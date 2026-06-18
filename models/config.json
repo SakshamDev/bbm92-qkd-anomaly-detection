@@ -1,0 +1,33 @@
+{
+  "threshold": 0.5,
+  "features": [
+    "qber_mean",
+    "qber_std",
+    "qber_delta",
+    "qber_skewness",
+    "qber_autocorr_lag1",
+    "qber_autocorr_lag5",
+    "bell_S_mean",
+    "bell_S_std",
+    "bell_S_delta",
+    "bell_S_below_2414",
+    "bell_S_pearson_qber",
+    "coincidence_mean",
+    "coincidence_drop_pct",
+    "coincidence_cv",
+    "coincidence_qber_corr",
+    "detection_to_coinc_ratio",
+    "qber_rolling_variance",
+    "bell_S_rolling_range",
+    "burst_energy",
+    "temporal_asymmetry",
+    "channel_loss_mean",
+    "visibility_mean",
+    "loss_qber_decoupling",
+    "S_coincidence_product"
+  ],
+  "cv_metrics_mean": {
+    "recall": 0.9511866505005983,
+    "fbeta2": 0.9565579964422393
+  }
+}

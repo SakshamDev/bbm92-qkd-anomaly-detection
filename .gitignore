@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Pytest / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# LaTeX build artifacts
+paper/src/*.aux
+paper/src/*.bbl
+paper/src/*.blg
+paper/src/*.log
+paper/src/*.out
+paper/src/*.synctex.gz
+paper/src/*.fdb_latexmk
+paper/src/*.fls
+
+# Generated data (we keep the parquet files as requested, but maybe ignore intermediate dumps if any)
+# All telemetry_*.parquet are kept.
+
+# Third-party data (download separately)
+data/zenodo/
+
+# Temporary model directories from multi-seed evaluation
+models_seed_*/
