@@ -1,223 +1,183 @@
 """
-core/channel.py — FSO+fibre BBM92 physical channel simulator.
+core/channel.py — First-Principles BBM92 Physical Simulator.
 
-Implements the complete atmospheric channel model for BBM92 entanglement-based QKD:
-  - Log-normal scintillation (Rytov variance model)
-  - Diurnal thermal gradient cycle
-  - Poisson-arrival precipitation burst noise
-  - Master normal-conditions simulator producing 24-hour telemetry
-
-All operations are fully vectorised NumPy. No Python-level per-second loops
-(except precipitation model which uses Poisson inter-arrival sampling).
-
-Physics reference:
-  BBM92 uses SPDC to produce |Φ⁺⟩ = (1/√2)(|HH⟩ + |VV⟩).
-  QBER baseline is 0% for ideal entanglement; real channels: 1–5%.
-  Bell S parameter: S = 2√2 × cos(2 × arcsin(√QBER)) for the |Φ⁺⟩ state.
-
+Implements the complete process-driven simulator:
+  1. Entangled pair generation
+  2. Channel propagation (Log-normal fading, precipitation)
+  3. Detection probabilities
+  4. Singles rates (Signal + Dark Counts)
+  5. True and Accidental coincidences
+  6. Sampled empirical measurement counters (Poisson distributed)
+  7. Derived observables (QBER, Bell S, SKR)
 """
 
-from __future__ import annotations
-
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict
 
 import numpy as np
+import pandas as pd
+
+from core.config import PHYSICS_CONFIG
 
 logger = logging.getLogger(__name__)
 
 
-def scintillation_model(
-    n_seconds: int,
-    sigma_I: float = 0.3,
-    seed: int = 42,
-) -> np.ndarray:
-    """
-    Models log-normal irradiance fluctuations due to atmospheric turbulence.
-
-    The irradiance I follows a log-normal distribution:
-        I ~ LogNormal(mu, sigma_I^2)
-    where mu = -0.5 * sigma_I^2 ensures E[I] = 1.
-
-    The scintillation index SI = sigma_I^2 characterises turbulence strength:
-        - Weak turbulence:   SI ∈ [0.1, 0.4]
-        - Moderate:          SI ∈ [0.4, 1.0]
-        - Strong:            SI > 1.0
-
-    Args:
-        n_seconds: Number of 1-second time steps to simulate.
-        sigma_I: Scintillation parameter (√SI). Default 0.3 (weak turbulence).
-        seed: RNG seed for reproducibility.
-
-    Returns:
-        Normalised photon loss fraction per second, shape (n_seconds,),
-        values clipped to [0.0, 0.95].
-    """
+def generate_lognormal_fading(n_seconds: int, sigma_I2: float, seed: int) -> np.ndarray:
+    """Generates log-normal atmospheric transmittance fading."""
     rng = np.random.default_rng(seed)
-    mu = -0.5 * sigma_I**2  # ensures E[I] = 1
-    log_I = rng.normal(mu, sigma_I, size=n_seconds)
-    I = np.exp(log_I)
-    # Convert irradiance to photon loss
-    loss_fraction = np.clip(1.0 - I, 0.0, 0.95)
-    return loss_fraction
+    mu = -0.5 * sigma_I2
+    # X ~ Normal(mu, sigma_I)
+    X = rng.normal(mu, np.sqrt(sigma_I2), size=n_seconds)
+    return np.exp(X)
 
 
-def thermal_gradient_model(
-    n_seconds: int,
-    day_start_sec: int = 0,
-) -> np.ndarray:
-    """
-    Models QBER contribution from ground-level thermal gradients.
-
-    Uses a sinusoidal model with:
-        - Peak at 14h (solar heating lag after solar noon at 12h)
-        - Trough at 4h (pre-dawn minimum)
-        - Amplitude: 0–0.016 QBER contribution
-
-    Args:
-        n_seconds: Number of 1-second time steps.
-        day_start_sec: Starting second offset within the day.
-
-    Returns:
-        QBER additive component, shape (n_seconds,), range [0, ~0.016].
-    """
-    t = np.arange(n_seconds) + day_start_sec
-    hour_of_day = (t / 3600.0) % 24.0
-    # Sinusoidal model: peak at 14h (solar heating lag), trough at 4h
-    thermal_qber = 0.008 * (0.5 + 0.5 * np.sin(
-        2 * np.pi * (hour_of_day - 4.0) / 24.0
-    ))
-    return thermal_qber
-
-
-def precipitation_model(
-    n_seconds: int,
-    p_event: float = 0.0003,
-    duration_range: Tuple[int, int] = (60, 600),
-    intensity: float = 0.04,
-    rng: Optional[np.random.Generator] = None,
-) -> np.ndarray:
-    """
-    Poisson-arrival precipitation bursts with Gaussian-envelope profiles.
-
-    Each burst event:
-        1. Inter-arrival time ~ Exponential(1/p_event)
-        2. Duration ~ Uniform(duration_range)
-        3. Envelope: sinusoidal ramp-up/ramp-down
-
-    Args:
-        n_seconds: Number of 1-second time steps.
-        p_event: Per-second probability of a precipitation event starting.
-        duration_range: (min_duration, max_duration) in seconds.
-        intensity: Peak QBER contribution during a burst.
-        rng: NumPy random generator. Created if None.
-
-    Returns:
-        QBER additive component (burst), shape (n_seconds,), clipped to [0, 0.15].
-    """
-    if rng is None:
-        rng = np.random.default_rng()
-
-    qber_contribution = np.zeros(n_seconds)
+def precipitation_model(n_seconds: int, p_event: float, rng: np.random.Generator) -> np.ndarray:
+    """Poisson-arrival precipitation bursts returning attenuation in dB."""
+    loss_dB = np.zeros(n_seconds)
     t = 0
     while t < n_seconds:
         inter_arrival = rng.exponential(1.0 / (p_event + 1e-10))
         t += int(inter_arrival)
         if t >= n_seconds:
             break
-        dur = int(rng.uniform(*duration_range))
+        dur = int(rng.uniform(60, 600))
         end = min(t + dur, n_seconds)
-        # Sinusoidal envelope: ramp up and down
+        
         burst_t = np.linspace(0, 1, end - t)
-        envelope = intensity * np.sin(np.pi * burst_t)
-        qber_contribution[t:end] += envelope
+        # Intensity between 1.0 and 5.0 dB of loss
+        intensity_dB = rng.uniform(1.0, 5.0)
+        envelope = intensity_dB * np.sin(np.pi * burst_t)
+        loss_dB[t:end] += envelope
         t = end
+        
+    return loss_dB
 
-    return np.clip(qber_contribution, 0, 0.15)
 
-
-def simulate_normal_channel(
-    n_seconds: int = 86400,
-    seed: int = 42,
-) -> Dict[str, np.ndarray]:
+def simulate_normal_channel(n_seconds: int = 86400, seed: int = 42) -> Dict[str, np.ndarray]:
     """
-    Generates a full 24-hour BBM92 telemetry stream under normal atmospheric conditions.
-
-    All operations are vectorised. Combines:
-        1. Baseline QBER from detector dark counts + optical misalignment
-        2. Scintillation-induced photon loss
-        3. Diurnal thermal gradient contribution
-        4. Precipitation burst noise
-
-    The Bell S parameter is computed from the exact BBM92 relationship:
-        S = 2√2 × cos(2 × arcsin(√QBER))
-
-    Coincidence rate is derived from channel loss (Beer-Lambert model).
-    Visibility tracks entanglement quality: V ≈ 1 - 2×QBER.
-
-    Args:
-        n_seconds: Duration in seconds (default: 86,400 = 24 hours).
-        seed: RNG seed for full reproducibility.
-
-    Returns:
-        Dictionary of NumPy arrays, each shape (n_seconds,):
-            qber:             Quantum Bit Error Rate (float, 0–1)
-            bell_S:           CHSH S parameter (float, 2.0–2.828)
-            coincidence_rate: Detected photon pairs per second (int)
-            visibility:       Hong-Ou-Mandel visibility (float, 0–1)
-            channel_loss_dB:  Total optical path loss (float, dB)
-            detection_rate:   Single-detector click rate (float)
-            label:            0 (normal) for all timesteps
+    Generates a full 24-hour BBM92 telemetry stream from first principles.
+    
+    Pipeline:
+    Entangled pair generation → channel propagation → detection probabilities → 
+    singles → true coincidences → accidental coincidences → sampled counters.
     """
-    logger.info(
-        "Simulating normal BBM92 channel: %d seconds, seed=%d",
-        n_seconds, seed,
-    )
+    logger.info("Simulating first-principles benign BBM92 channel: %d seconds, seed=%d", n_seconds, seed)
     rng = np.random.default_rng(seed)
+    cfg = PHYSICS_CONFIG
 
-    # Base QBER = detector dark counts + optical misalignment + fibre birefringence
-    qber_base = 0.02 + rng.normal(0, 0.003, n_seconds)
+    # 1. Entangled pair generation (pairs/sec)
+    R_pair = np.full(n_seconds, cfg.source_pair_rate)
+    V = cfg.source_visibility
 
-    # Add atmospheric contributions (vectorised)
-    scint_loss = scintillation_model(n_seconds, sigma_I=0.25, seed=seed)
-    thermal_qber = thermal_gradient_model(n_seconds)
-    precip_qber = precipitation_model(n_seconds, rng=rng)
+    # 2. Channel propagation
+    # Alice is colocated with the source
+    eta_atm_A = np.full(n_seconds, cfg.eta_atm_alice_base)
+    
+    # Bob experiences log-normal fading and precipitation
+    eta_scint_B = generate_lognormal_fading(n_seconds, cfg.scintillation_variance, seed)
+    precip_loss_dB = precipitation_model(n_seconds, cfg.precipitation_prob, rng)
+    eta_precip_B = 10.0 ** (-precip_loss_dB / 10.0)
+    
+    eta_atm_B = cfg.eta_atm_bob_base * eta_scint_B * eta_precip_B
 
-    qber = np.clip(
-        qber_base + 0.1 * scint_loss + thermal_qber + precip_qber,
-        0.005, 0.12,
-    )
+    # Total end-to-end transmittances
+    eta_total_A = eta_atm_A * cfg.eta_sys_alice
+    eta_total_B = eta_atm_B * cfg.eta_sys_bob
 
-    # Bell S degrades with QBER: S ≈ 2√2 × cos(2 × arcsin(√QBER))
-    # This is the exact theoretical BBM92 relationship for the |Φ⁺⟩ state
-    bell_S = 2.0 * np.sqrt(2) * np.cos(
-        2.0 * np.arcsin(np.sqrt(np.clip(qber, 0, 0.499)))
-    )
-    bell_S = np.clip(bell_S + rng.normal(0, 0.02, n_seconds), 2.0, 2.828)
+    # 3. Detection probabilities
+    P_det_A = eta_total_A * cfg.detector_efficiency
+    P_det_B = eta_total_B * cfg.detector_efficiency
 
-    # Coincidence rate: baseline 10,000/s, degraded by channel loss
-    channel_loss_dB = 3.0 + 20.0 * scint_loss + rng.normal(0, 0.5, n_seconds)
-    channel_loss_linear = 10.0 ** (-channel_loss_dB / 10.0)
-    coincidence_rate = np.round(
-        10000 * channel_loss_linear + rng.normal(0, 50, n_seconds)
-    ).astype(int)
-    coincidence_rate = np.clip(coincidence_rate, 0, 12000)
+    # 4. Singles
+    # Alice is local, typically dark counts only, but may have local stray light
+    R_A = R_pair * P_det_A + cfg.detector_dark_counts + getattr(cfg, 'detector_background_counts', 0.0)
+    # Bob is remote, experiences dark counts + background stray light (e.g. 50kcps)
+    R_B = R_pair * P_det_B + cfg.detector_dark_counts + getattr(cfg, 'detector_background_counts', 0.0)
 
-    # Visibility: related to entanglement quality
-    visibility = np.clip(
-        1.0 - 2.0 * qber + rng.normal(0, 0.01, n_seconds),
-        0.7, 1.0,
-    )
+    # 5. True and Accidental Coincidences (Expected Rates)
+    R_true_c = R_pair * P_det_A * P_det_B
+    R_acc_c = R_A * R_B * cfg.coincidence_window
+    
+    # Total coincidence rate expected
+    R_c_expected = R_true_c + R_acc_c
+    
+    channel_loss_dB = -10.0 * np.log10(np.clip(eta_atm_B * cfg.eta_sys_bob, 1e-10, 1.0))
 
-    # Single detector rate (dark counts + real events)
-    detection_rate = 2.0 * coincidence_rate + rng.poisson(200, n_seconds)
+    # 6. Sampled Counters (Empirical Measurements)
+    # We model a system that randomly alternates between key generation bases (Z, X) 
+    # and Bell test bases (CHSH angles A1, A2, B1, B2).
+    # Assume 16 total basis combinations, chosen uniformly.
+    # Each combination gets 1/16 of the total rates.
+    
+    # Key Generation Counters (2 matching bases: ZZ, XX)
+    # True coincidence probabilities: P(match) = (1+V)/2, P(mismatch) = (1-V)/2
+    E_true_key = (R_true_c / 16.0)
+    E_acc = (R_acc_c / 16.0)
+    
+    # We have 2 matching bases. 
+    # Each basis has 2 matched outcomes (++, --) and 2 mismatched outcomes (+-, -+).
+    # So 4 match counters and 4 mismatch counters for key generation.
+    lambda_key_match = (E_true_key * (1 + V) / 4.0) + (E_acc / 4.0)
+    lambda_key_mismatch = (E_true_key * (1 - V) / 4.0) + (E_acc / 4.0)
+    
+    # Sample the empirical counters
+    C_key_match = rng.poisson(lambda_key_match, size=(4, n_seconds))
+    C_key_mismatch = rng.poisson(lambda_key_mismatch, size=(4, n_seconds))
+    
+    total_key_matches = np.sum(C_key_match, axis=0)
+    total_key_mismatches = np.sum(C_key_mismatch, axis=0)
+    total_key_events = total_key_matches + total_key_mismatches
 
-    logger.info(
-        "Normal channel generated: mean QBER=%.4f, mean S=%.3f, mean coincidence=%d",
-        float(np.mean(qber)),
-        float(np.mean(bell_S)),
-        int(np.mean(coincidence_rate)),
-    )
+    # QBER is purely empirical
+    qber = total_key_mismatches / np.maximum(1, total_key_events)
+
+    # Bell S Counters (4 CHSH bases: A1B1, A1B2, A2B1, A2B2)
+    # For CHSH, 3 correlators have E = V / sqrt(2), 1 has E = -V / sqrt(2)
+    V_CHSH = V / np.sqrt(2)
+    
+    lambda_chsh_pos_match = (E_true_key * (1 + V_CHSH) / 4.0) + (E_acc / 4.0)
+    lambda_chsh_pos_mismatch = (E_true_key * (1 - V_CHSH) / 4.0) + (E_acc / 4.0)
+    
+    lambda_chsh_neg_match = (E_true_key * (1 - V_CHSH) / 4.0) + (E_acc / 4.0)
+    lambda_chsh_neg_mismatch = (E_true_key * (1 + V_CHSH) / 4.0) + (E_acc / 4.0)
+
+    # Sample the 4 CHSH bases (each has 4 counters: ++, --, +-, -+)
+    # Base 1, 2, 3 (Positive correlators)
+    C_chsh_pos_match = rng.poisson(lambda_chsh_pos_match, size=(3, 2, n_seconds)) # 3 bases, 2 match outcomes
+    C_chsh_pos_mismatch = rng.poisson(lambda_chsh_pos_mismatch, size=(3, 2, n_seconds)) # 3 bases, 2 mismatch outcomes
+    
+    # Base 4 (Negative correlator)
+    C_chsh_neg_match = rng.poisson(lambda_chsh_neg_match, size=(1, 2, n_seconds))
+    C_chsh_neg_mismatch = rng.poisson(lambda_chsh_neg_mismatch, size=(1, 2, n_seconds))
+    
+    # Compute the empirical correlators E(x,y)
+    def compute_E(match_arr, mismatch_arr):
+        # match_arr shape: (n_bases, 2, n_seconds)
+        match_sum = np.sum(match_arr, axis=1)
+        mismatch_sum = np.sum(mismatch_arr, axis=1)
+        total = match_sum + mismatch_sum
+        return (match_sum - mismatch_sum) / np.maximum(1, total)
+
+    E_pos = compute_E(C_chsh_pos_match, C_chsh_pos_mismatch) # shape (3, n_seconds)
+    E_neg = compute_E(C_chsh_neg_match, C_chsh_neg_mismatch) # shape (1, n_seconds)
+
+    # S = |E1 + E2 + E3 - E4| (standard formulation grouping)
+    bell_S = np.abs(E_pos[0] + E_pos[1] + E_pos[2] - E_neg[0])
+    
+    # 7. Additional Observables
+    # Total coincidences (scaled up from the 16 bases to represent 100% operation for standard metrics)
+    coincidence_rate = rng.poisson(R_c_expected)
+    detection_rate = rng.poisson(R_A + R_B)
+    
+    # Visibility (empirical from key bases)
+    visibility = (total_key_matches - total_key_mismatches) / np.maximum(1, total_key_events)
+    visibility = np.clip(visibility, 0, 1.0)
+    
+    # Smooth out anomalies in extreme low-count periods to avoid math warnings
+    mask_low_counts = total_key_events < 5
+    qber[mask_low_counts] = 0.5
+    bell_S[mask_low_counts] = 0.0
+    visibility[mask_low_counts] = 0.0
 
     return {
         'qber': qber,
@@ -229,3 +189,9 @@ def simulate_normal_channel(
         'label': np.zeros(n_seconds, dtype=int),
         'attack_type': np.zeros(n_seconds, dtype=int),
     }
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO)
+    res = simulate_normal_channel(n_seconds=10)
+    for k, v in res.items():
+        print(f"{k}: {v[:5]}")
