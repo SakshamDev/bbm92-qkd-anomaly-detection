@@ -11,13 +11,14 @@ import os
 import shutil
 import time
 import sys
+import gc
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import joblib
+
 import numpy as np
 import pandas as pd
 import xgboost as xgb
@@ -96,12 +97,16 @@ def main():
         'Blended Sub-Threshold': {'recall': [], 'count': []}
     }
 
-    for seed in [42, 1337, 2024, 777, 101010]:
+    for i, seed in enumerate(SEEDS):
         logger.info(f"\n{'='*40}\nProcessing Seed {seed}\n{'='*40}")
         
-        # 1. Generate data
+        # 1. Load or Generate data
         data_path = f'data/telemetry_{seed}.parquet'
-        df = build_telemetry_dataset(n_seconds=N_SECONDS, seed=seed, output_path=data_path)
+        if os.path.exists(data_path):
+            logger.info(f"Loading existing telemetry dataset from {data_path}")
+            df = pd.read_parquet(data_path)
+        else:
+            df = build_telemetry_dataset(n_seconds=N_SECONDS, seed=seed, output_path=data_path)
         
         # 2. Extract features
         X, y = build_feature_matrix(df, window=30)
@@ -141,7 +146,9 @@ def main():
             
         # Clean up models to save space
         if seed != 42:
-            shutil.rmtree(f'models_seed_{seed}')
+            # Keep only the config.json for downstream analysis
+            if os.path.exists(f'models_seed_{seed}/xgb_model.json'):
+                os.remove(f'models_seed_{seed}/xgb_model.json')
         else:
             # Keep the first seed's model as the "primary" model for the dashboard
             if os.path.exists('models'):
@@ -155,7 +162,18 @@ def main():
                 'config': config
             }
             logger.info("Generating publication figures for primary holdout set...")
-            run_full_evaluation(X_test, y_test, attack_types_test, model_artifacts, figures_dir='paper/figures/')
+            run_full_evaluation(X_test, y_test, attack_types_test, model_artifacts, figures_dir='data/figures/')
+            
+        # Free memory of all large data objects explicitly
+        del df, X, y, attack_types, qber, X_train, y_train, X_test, y_test, attack_types_test, qber_test
+        del xgb_model, metrics, a_metrics
+        if seed == 42:
+            del model_artifacts
+        gc.collect()
+        
+        # Cool down if not the last seed
+        if seed != SEEDS[-1]:
+            logger.info("Cooling down for 180 seconds to prevent thermal throttling... (skipped)")
 
     # --- Print Comparison Report ---
     print("\n" + "="*60)

@@ -12,12 +12,12 @@ Implements the complete process-driven simulator:
 """
 
 import logging
-from typing import Dict
-
+from typing import Dict, Optional, List
 import numpy as np
 import pandas as pd
 
-from core.config import PHYSICS_CONFIG
+from core.config import PHYSICS_CONFIG, DetectorMode
+from core.attacks import AttackStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +31,45 @@ def generate_lognormal_fading(n_seconds: int, sigma_I2: float, seed: int) -> np.
     return np.exp(X)
 
 
-def precipitation_model(n_seconds: int, p_event: float, rng: np.random.Generator) -> np.ndarray:
+def scintillation_model(n_seconds: int, sigma_I: float = 0.3, seed: int = 42) -> np.ndarray:
+    """
+    Models log-normal irradiance fluctuations due to atmospheric turbulence.
+
+    I ~ LogNormal(mu, sigma_I^2), scintillation index SI = sigma_I^2.
+    Weak turbulence regime: sigma_I in [0.1, 0.4].
+
+    Returns: normalised photon loss fraction per second, shape (n_seconds,),
+             values in [0, 0.95].
+    """
+    sigma_I2 = sigma_I ** 2
+    transmittance = generate_lognormal_fading(n_seconds, sigma_I2, seed)
+    # Convert transmittance to loss fraction, clipped to [0, 0.95]
+    loss_fraction = np.clip(1.0 - transmittance / (transmittance.max() + 1e-9), 0.0, 0.95)
+    return loss_fraction
+
+
+def thermal_gradient_model(n_seconds: int, day_start_sec: int = 0) -> np.ndarray:
+    """
+    Models QBER contribution from ground-level thermal gradients.
+    Peak at solar noon (~14h due to heating lag), minimum at pre-dawn (~4h).
+
+    Returns: QBER additive component, shape (n_seconds,), values in [0, ~0.016].
+    """
+    t = np.arange(n_seconds) + day_start_sec
+    hour_of_day = (t / 3600.0) % 24.0
+    # Sinusoidal model: peak at 14h (solar heating lag), trough at 2h
+    thermal_qber = 0.008 * (0.5 + 0.5 * np.sin(2 * np.pi * (hour_of_day - 8.0) / 24.0))
+    return thermal_qber
+
+
+def precipitation_model(
+    n_seconds: int,
+    p_event: float = 0.0003,
+    rng: Optional[np.random.Generator] = None,
+) -> np.ndarray:
     """Poisson-arrival precipitation bursts returning attenuation in dB."""
+    if rng is None:
+        rng = np.random.default_rng()
     loss_dB = np.zeros(n_seconds)
     t = 0
     while t < n_seconds:
@@ -53,7 +90,11 @@ def precipitation_model(n_seconds: int, p_event: float, rng: np.random.Generator
     return loss_dB
 
 
-def simulate_normal_channel(n_seconds: int = 86400, seed: int = 42) -> Dict[str, np.ndarray]:
+def simulate_normal_channel(
+    n_seconds: int = 86400, 
+    seed: int = 42,
+    attack_strategies: Optional[List[AttackStrategy]] = None
+) -> Dict[str, np.ndarray]:
     """
     Generates a full 24-hour BBM92 telemetry stream from first principles.
     
@@ -61,66 +102,105 @@ def simulate_normal_channel(n_seconds: int = 86400, seed: int = 42) -> Dict[str,
     Entangled pair generation → channel propagation → detection probabilities → 
     singles → true coincidences → accidental coincidences → sampled counters.
     """
-    logger.info("Simulating first-principles benign BBM92 channel: %d seconds, seed=%d", n_seconds, seed)
+    logger.info("Simulating first-principles BBM92 channel: %d seconds, seed=%d", n_seconds, seed)
     rng = np.random.default_rng(seed)
     cfg = PHYSICS_CONFIG
 
-    # 1. Entangled pair generation (pairs/sec)
+    # 1. Base Physical State Variables (Arrays for n_seconds)
     R_pair = np.full(n_seconds, cfg.source_pair_rate)
-    V = cfg.source_visibility
-
-    # 2. Channel propagation
-    # Alice is colocated with the source
+    V_source = np.full(n_seconds, cfg.source_visibility)
     eta_atm_A = np.full(n_seconds, cfg.eta_atm_alice_base)
     
-    # Bob experiences log-normal fading and precipitation
     eta_scint_B = generate_lognormal_fading(n_seconds, cfg.scintillation_variance, seed)
     precip_loss_dB = precipitation_model(n_seconds, cfg.precipitation_prob, rng)
     eta_precip_B = 10.0 ** (-precip_loss_dB / 10.0)
-    
     eta_atm_B = cfg.eta_atm_bob_base * eta_scint_B * eta_precip_B
+    
+    detector_mode_B = np.full(n_seconds, DetectorMode.GEIGER.value)
+    background_B = np.full(n_seconds, getattr(cfg, 'detector_background_counts', 0.0))
 
-    # Total end-to-end transmittances
-    eta_total_A = eta_atm_A * cfg.eta_sys_alice
-    eta_total_B = eta_atm_B * cfg.eta_sys_bob
+    deterministic_match_rate = np.zeros(n_seconds)
+    deterministic_mismatch_rate = np.zeros(n_seconds)
+    deterministic_chsh_pos = np.zeros(n_seconds)
+    deterministic_chsh_neg = np.zeros(n_seconds)
+    
+    attack_label = np.zeros(n_seconds, dtype=int)
+    attack_type = np.zeros(n_seconds, dtype=int)
+    final_channel_loss_dB: np.ndarray | None = None
+
+    # 2. Apply Attack Strategies (Eve manipulates physics)
+    if attack_strategies:
+        for strategy in attack_strategies:
+            attack_mods = strategy.apply(
+                n_seconds, V_source, eta_atm_B, detector_mode_B, background_B, rng
+            )
+            if attack_mods:
+                V_source = attack_mods['V']
+                eta_atm_B = attack_mods['eta_atm_B']
+                detector_mode_B = attack_mods['detector_mode_B']
+                background_B = attack_mods['background_B']
+                # Add deterministic rates from all strategies
+                deterministic_match_rate += attack_mods['deterministic_match_rate']
+                deterministic_mismatch_rate += attack_mods['deterministic_mismatch_rate']
+                deterministic_chsh_pos += attack_mods['deterministic_chsh_pos']
+                deterministic_chsh_neg += attack_mods['deterministic_chsh_neg']
+                
+                # Apply classical spoofing override if present
+                spoofed_loss = attack_mods.get('spoofed_channel_loss_dB')
+                sl = strategy._get_slice(n_seconds)
+                if spoofed_loss is not None:
+                    # Initialize the array if this is the first spoof
+                    if final_channel_loss_dB is None:
+                        final_channel_loss_dB = -10.0 * np.log10(np.clip(eta_atm_B * cfg.eta_sys_bob, 1e-10, 1.0))
+                    try:
+                        final_channel_loss_dB[sl] = spoofed_loss
+                    except ValueError as e:
+                        print(f"CRASH! sl={sl}, spoofed_loss.shape={np.shape(spoofed_loss)}, final_channel_loss_dB.shape={np.shape(final_channel_loss_dB)}")
+                        raise e
+                
+                attack_label[sl] = 1
+                attack_type[sl] = strategy.attack_type_id
 
     # 3. Detection probabilities
+    eta_total_A = eta_atm_A * cfg.eta_sys_alice
+    eta_total_B = eta_atm_B * cfg.eta_sys_bob
+    
     P_det_A = eta_total_A * cfg.detector_efficiency
     P_det_B = eta_total_B * cfg.detector_efficiency
+    
+    # If Bob is in linear mode, his single-photon detection drops to 0
+    is_linear = (detector_mode_B == DetectorMode.LINEAR.value)
+    P_det_B[is_linear] = 0.0
 
     # 4. Singles
-    # Alice is local, typically dark counts only, but may have local stray light
     R_A = R_pair * P_det_A + cfg.detector_dark_counts + getattr(cfg, 'detector_background_counts', 0.0)
-    # Bob is remote, experiences dark counts + background stray light (e.g. 50kcps)
-    R_B = R_pair * P_det_B + cfg.detector_dark_counts + getattr(cfg, 'detector_background_counts', 0.0)
+    
+    # In linear mode, Bob's dark counts vanish (they don't cross discriminator)
+    DCR_B = np.where(is_linear, 0.0, cfg.detector_dark_counts)
+    R_B = R_pair * P_det_B + DCR_B + background_B
 
     # 5. True and Accidental Coincidences (Expected Rates)
     R_true_c = R_pair * P_det_A * P_det_B
-    R_acc_c = R_A * R_B * cfg.coincidence_window
+    R_acc_c = 1.0 * R_A * R_B * cfg.coincidence_window
     
-    # Total coincidence rate expected
+    # Total expected quantum coincidence rate
     R_c_expected = R_true_c + R_acc_c
     
-    channel_loss_dB = -10.0 * np.log10(np.clip(eta_atm_B * cfg.eta_sys_bob, 1e-10, 1.0))
+    # Base classical telemetry (if not spoofed)
+    if final_channel_loss_dB is None:
+        final_channel_loss_dB = -10.0 * np.log10(np.clip(eta_atm_B * cfg.eta_sys_bob, 1e-10, 1.0))
+    channel_loss_dB = final_channel_loss_dB
 
     # 6. Sampled Counters (Empirical Measurements)
-    # We model a system that randomly alternates between key generation bases (Z, X) 
-    # and Bell test bases (CHSH angles A1, A2, B1, B2).
-    # Assume 16 total basis combinations, chosen uniformly.
-    # Each combination gets 1/16 of the total rates.
+    # 16 total basis combinations, chosen uniformly.
     
-    # Key Generation Counters (2 matching bases: ZZ, XX)
-    # True coincidence probabilities: P(match) = (1+V)/2, P(mismatch) = (1-V)/2
+    # Key Generation Counters
     E_true_key = (R_true_c / 16.0)
     E_acc = (R_acc_c / 16.0)
     
-    # We have 2 matching bases. 
-    # Each basis has 2 matched outcomes (++, --) and 2 mismatched outcomes (+-, -+).
-    # So 4 match counters and 4 mismatch counters for key generation.
-    lambda_key_match = (E_true_key * (1 + V) / 4.0) + (E_acc / 4.0)
-    lambda_key_mismatch = (E_true_key * (1 - V) / 4.0) + (E_acc / 4.0)
+    lambda_key_match = (E_true_key * (1 + V_source) / 4.0) + (E_acc / 4.0) + (deterministic_match_rate / 4.0)
+    lambda_key_mismatch = (E_true_key * (1 - V_source) / 4.0) + (E_acc / 4.0) + (deterministic_mismatch_rate / 4.0)
     
-    # Sample the empirical counters
     C_key_match = rng.poisson(lambda_key_match, size=(4, n_seconds))
     C_key_mismatch = rng.poisson(lambda_key_mismatch, size=(4, n_seconds))
     
@@ -128,17 +208,15 @@ def simulate_normal_channel(n_seconds: int = 86400, seed: int = 42) -> Dict[str,
     total_key_mismatches = np.sum(C_key_mismatch, axis=0)
     total_key_events = total_key_matches + total_key_mismatches
 
-    # QBER is purely empirical
     qber = total_key_mismatches / np.maximum(1, total_key_events)
 
-    # Bell S Counters (4 CHSH bases: A1B1, A1B2, A2B1, A2B2)
-    # For CHSH, 3 correlators have E = V / sqrt(2), 1 has E = -V / sqrt(2)
-    V_CHSH = V / np.sqrt(2)
+    # Bell S Counters
+    V_CHSH = V_source / np.sqrt(2)
     
-    lambda_chsh_pos_match = (E_true_key * (1 + V_CHSH) / 4.0) + (E_acc / 4.0)
+    lambda_chsh_pos_match = (E_true_key * (1 + V_CHSH) / 4.0) + (E_acc / 4.0) + (deterministic_chsh_pos / 6.0)
     lambda_chsh_pos_mismatch = (E_true_key * (1 - V_CHSH) / 4.0) + (E_acc / 4.0)
     
-    lambda_chsh_neg_match = (E_true_key * (1 - V_CHSH) / 4.0) + (E_acc / 4.0)
+    lambda_chsh_neg_match = (E_true_key * (1 - V_CHSH) / 4.0) + (E_acc / 4.0) + (deterministic_chsh_neg / 2.0)
     lambda_chsh_neg_mismatch = (E_true_key * (1 + V_CHSH) / 4.0) + (E_acc / 4.0)
 
     # Sample the 4 CHSH bases (each has 4 counters: ++, --, +-, -+)
@@ -166,7 +244,9 @@ def simulate_normal_channel(n_seconds: int = 86400, seed: int = 42) -> Dict[str,
     
     # 7. Additional Observables
     # Total coincidences (scaled up from the 16 bases to represent 100% operation for standard metrics)
-    coincidence_rate = rng.poisson(R_c_expected)
+    # The deterministic rates are already total sums for their respective basis groups.
+    det_total = deterministic_match_rate + deterministic_chsh_pos + deterministic_chsh_neg
+    coincidence_rate = rng.poisson(R_c_expected + det_total)
     detection_rate = rng.poisson(R_A + R_B)
     
     # Visibility (empirical from key bases)
@@ -186,8 +266,8 @@ def simulate_normal_channel(n_seconds: int = 86400, seed: int = 42) -> Dict[str,
         'visibility': visibility,
         'channel_loss_dB': channel_loss_dB,
         'detection_rate': detection_rate.astype(float),
-        'label': np.zeros(n_seconds, dtype=int),
-        'attack_type': np.zeros(n_seconds, dtype=int),
+        'label': attack_label,
+        'attack_type': attack_type,
     }
 
 if __name__ == '__main__':

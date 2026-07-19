@@ -1,25 +1,25 @@
 """
-ml/features.py — 24-dimensional feature engineering pipeline for BBM92 QKD.
+ml/features.py — 22-dimensional feature engineering pipeline for BBM92 QKD.
 
-Computes rolling-window features from raw telemetry at 1 Hz. The 24 features
+Computes rolling-window features from raw telemetry at 1 Hz. The 22 features
 capture temporal structure invisible to static QBER thresholds, which is the
 core advantage over naive threshold-based anomaly detection.
 
-Feature groups (24 total):
-    QBER features (6):       Statistical moments and autocorrelation
-    Bell S features (5):     Entanglement health and QBER correlation
-    Coincidence features (5): Rate analysis, PNS signatures
-    Temporal structure (4):  Drift vs step-change discrimination
-    Cross-channel (4):       Multi-observable anomaly decoupling
-
-Window size: 30 seconds (tunable hyperparameter).
-
+# Feature groups (22 total):
+#     QBER features (6):       Statistical moments and autocorrelation
+#     Bell S features (5):     Entanglement health and QBER correlation
+#     Coincidence features (5): Rate analysis, PNS signatures
+#     Temporal structure (2):  Drift vs step-change discrimination
+#     Cross-channel (4):       Multi-observable anomaly decoupling
+#
+# Window size: 30 seconds (tunable hyperparameter).
+#
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Union
+
 
 import numpy as np
 import pandas as pd
@@ -52,10 +52,8 @@ FEATURE_NAMES: list[str] = [
     'coincidence_qber_corr',  # Cross-correlation with QBER
     'detection_to_coinc_ratio',  # Ratio: anomalous if Eve splits pairs
 
-    # -- Temporal structure (4) --
-    'qber_rolling_variance',  # Rolling variance (smooth drift vs step)
+    # -- Temporal structure (2) --
     'bell_S_rolling_range',   # Max-min range of S in window (stability)
-    'burst_energy',           # L2 norm of QBER deviations from window mean
     'temporal_asymmetry',     # Rising vs falling edge asymmetry in QBER
 
     # -- Cross-channel (4) --
@@ -65,7 +63,7 @@ FEATURE_NAMES: list[str] = [
     'S_coincidence_product', # S × coincidence_rate: joint health metric
 ]
 
-assert len(FEATURE_NAMES) == 24, f"Expected 24 features, got {len(FEATURE_NAMES)}"
+assert len(FEATURE_NAMES) == 22, f"Expected 22 features, got {len(FEATURE_NAMES)}"
 
 
 def _autocorr(x: np.ndarray, lag: int) -> float:
@@ -98,7 +96,7 @@ def _autocorr(x: np.ndarray, lag: int) -> float:
 
 def extract_features_single(window: pd.DataFrame) -> np.ndarray:
     """
-    Extracts the 24-dimensional feature vector from a 30-row window.
+    Extracts the 22-dimensional feature vector from a 30-row window.
 
     Called at 1 Hz during live inference. Each feature is documented
     in the FEATURE_NAMES list above.
@@ -109,10 +107,10 @@ def extract_features_single(window: pd.DataFrame) -> np.ndarray:
             channel_loss_dB, detection_rate
 
     Returns:
-        numpy array, shape (24,), dtype float32.
+        numpy array, shape (22,), dtype float32.
 
     Raises:
-        AssertionError: If output shape is not (24,).
+        AssertionError: If output shape is not (22,).
     """
     q = window['qber'].values.astype(np.float64)
     S = window['bell_S'].values.astype(np.float64)
@@ -159,10 +157,8 @@ def extract_features_single(window: pd.DataFrame) -> np.ndarray:
         det_mean / (2.0 * coincidence_mean + eps)
     )
 
-    # ──── Temporal structure (4) ────
-    qber_rolling_variance = float(np.var(q))
+    # ──── Temporal structure (2) ────
     bell_S_rolling_range = float(np.max(S) - np.min(S))
-    burst_energy = float(np.sqrt(np.mean((q - qber_mean) ** 2)))
     # Asymmetry: compare mean of second half vs first half
     mid = len(q) // 2
     temporal_asymmetry = float(np.mean(q[mid:]) - np.mean(q[:mid]))
@@ -185,13 +181,12 @@ def extract_features_single(window: pd.DataFrame) -> np.ndarray:
         bell_S_below_2414, bell_S_pearson_qber,
         coincidence_mean, coincidence_drop_pct, coincidence_cv,
         coincidence_qber_corr, detection_to_coinc_ratio,
-        qber_rolling_variance, bell_S_rolling_range, burst_energy,
-        temporal_asymmetry,
+        bell_S_rolling_range, temporal_asymmetry,
         channel_loss_mean, visibility_mean, loss_qber_decoupling,
         S_coincidence_product,
     ], dtype=np.float32)
 
-    assert features.shape == (24,), f"Feature shape mismatch: {features.shape}"
+    assert features.shape == (22,), f"Feature shape mismatch: {features.shape}"
     return features
 
 
@@ -202,7 +197,7 @@ def build_feature_matrix(
     """
     Applies rolling feature extraction to the full 86,400-row DataFrame.
 
-    For each timestep t ≥ window, extracts the 24-dimensional feature vector
+    For each timestep t ≥ window, extracts the 22-dimensional feature vector
     from the preceding `window` seconds. The label is taken from the last
     timestep in the window (i.e., the current second).
 
@@ -215,7 +210,7 @@ def build_feature_matrix(
         window: Rolling window size in seconds (default: 30).
 
     Returns:
-        X: Feature matrix, shape (n - window, 24), dtype float32.
+        X: Feature matrix, shape (n - window, 22), dtype float32.
         y: Label vector, shape (n - window,), dtype int.
     """
     n = len(df)
@@ -233,6 +228,10 @@ def build_feature_matrix(
     )
 
     for i in range(window, n):
+        # E-6: Mask out windows containing sentinels
+        if 'is_low_count' in df.columns and df.iloc[i - window:i]['is_low_count'].any():
+            continue
+            
         window_df = df.iloc[i - window:i][feature_cols]
         X_list.append(extract_features_single(window_df))
         y_list.append(int(df.iloc[i]['label']))
@@ -253,4 +252,40 @@ def build_feature_matrix(
         X.shape, y.shape, float(y.mean()),
     )
 
+    return X, y
+
+def build_raw_feature_matrix(
+    df: pd.DataFrame,
+    window: int = WINDOW,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Extracts raw instantaneous telemetry (QBER, Bell S, etc.) without rolling windows.
+    Skips the first `window` seconds so the output aligns exactly with the temporal matrix.
+
+    Args:
+        df: Full telemetry DataFrame.
+        window: Number of seconds to skip at the beginning to match `build_feature_matrix`.
+
+    Returns:
+        X: Feature matrix, shape (n - window, 6), dtype float32.
+        y: Label vector, shape (n - window,), dtype int.
+    """
+    feature_cols = [
+        'qber', 'bell_S', 'coincidence_rate',
+        'visibility', 'channel_loss_dB', 'detection_rate',
+    ]
+    
+    logger.info("Building RAW feature matrix (instantaneous telemetry only)")
+    
+    # Skip the first `window` rows to exactly match the temporal dataset size
+    df_clipped = df.iloc[window:].copy()
+    
+    X = df_clipped[feature_cols].values.astype(np.float32)
+    y = df_clipped['label'].values.astype(int)
+    
+    logger.info(
+        "Raw Feature matrix built: X=%s, y=%s, attack rate=%.3f",
+        X.shape, y.shape, float(y.mean()),
+    )
+    
     return X, y

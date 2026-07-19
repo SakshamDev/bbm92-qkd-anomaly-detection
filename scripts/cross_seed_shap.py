@@ -34,8 +34,8 @@ def main():
     }
     
     # Store sum of mean absolute SHAP values across seeds for each attack type
-    # shape: (4, 24)
-    sum_mean_abs_shap = {k: np.zeros(24) for k in attack_names.keys()}
+    # shape: (4, num_features)
+    sum_mean_abs_shap = {k: np.zeros(len(FEATURE_NAMES)) for k in attack_names.keys()}
     counts = {k: 0 for k in attack_names.keys()}
     
     for seed in SEEDS:
@@ -52,8 +52,10 @@ def main():
         
         scale_pos = np.sum(y_train == 0) / np.sum(y_train == 1)
         xgb_model = xgb.XGBClassifier(
-            n_estimators=100, max_depth=6, learning_rate=0.05, 
-            scale_pos_weight=scale_pos, random_state=seed, n_jobs=-1
+            n_estimators=300, max_depth=6, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8, scale_pos_weight=scale_pos,
+            use_label_encoder=False, eval_metric='logloss',
+            tree_method='hist', random_state=seed, n_jobs=-1
         )
         xgb_model.fit(X_train, y_train)
         

@@ -8,9 +8,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import numpy as np
 import pandas as pd
+import numpy as np
 import xgboost as xgb
+import json
 
 from core.telemetry import build_telemetry_dataset
 from ml.features import build_feature_matrix
@@ -38,10 +39,20 @@ def main():
     attack_types_test = attack_types[TRAIN_SECONDS - 30:]
     
     scale_pos = np.sum(y_train == 0) / np.sum(y_train == 1)
-    xgb_model = xgb.XGBClassifier(n_estimators=300, max_depth=6, learning_rate=0.05, scale_pos_weight=scale_pos, random_state=seed)
+    xgb_model = xgb.XGBClassifier(
+        n_estimators=300, max_depth=6, learning_rate=0.05,
+        subsample=0.8, colsample_bytree=0.8, scale_pos_weight=scale_pos,
+        use_label_encoder=False, eval_metric='logloss',
+        tree_method='hist', random_state=seed, n_jobs=-1
+    )
     xgb_model.fit(X_train, y_train)
     
-    pred_xgb = (xgb_model.predict_proba(X_test)[:, 1] >= 0.5).astype(int)
+    # Analyze latency vs detection rate
+    config_path = f'models_seed_42/config.json'
+    with open(config_path, 'r') as file:
+        config = json.load(file)
+    threshold = config.get('threshold', 0.5)
+    pred_xgb = (xgb_model.predict_proba(X_test)[:, 1] >= threshold).astype(int)
     
     # Identify contiguous attack blocks in y_test
     # A block starts when y_test changes from 0 to 1

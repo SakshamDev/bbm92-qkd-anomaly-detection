@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sys
+import warnings
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -12,7 +13,6 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from sklearn.ensemble import RandomForestClassifier, IsolationForest, HistGradientBoostingClassifier
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import fbeta_score, precision_score, recall_score, roc_auc_score
 from statsmodels.stats.contingency_tables import mcnemar
 
@@ -44,7 +44,7 @@ def compute_mcnemar(y_true, y_pred1, y_pred2):
 def main():
     logger.info("Starting ML Baseline Evaluation...")
     
-    models_to_evaluate = ['threshold', 'LogisticRegression', 'IsolationForest', 'RandomForest', 'LightGBM', 'XGBoost']
+    models_to_evaluate = ['threshold', 'IsolationForest', 'RandomForest', 'LightGBM', 'XGBoost']
     
     results = {m: {'recall': [], 'precision': [], 'f2': [], 'auc': []} for m in models_to_evaluate}
     
@@ -74,22 +74,7 @@ def main():
         results['threshold']['f2'].append(fbeta_score(y_test, pred_thresh, beta=2, zero_division=0))
         pooled_preds['threshold'].append(pred_thresh)
         
-        # 2. Logistic Regression
-        # Normalize data for LR
-        from sklearn.preprocessing import StandardScaler
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-        
-        lr = LogisticRegression(class_weight='balanced', max_iter=2000)
-        lr.fit(X_train_scaled, y_train)
-        pred_lr = lr.predict(X_test_scaled)
-        prob_lr = lr.predict_proba(X_test_scaled)[:, 1]
-        results['LogisticRegression']['recall'].append(recall_score(y_test, pred_lr, zero_division=0))
-        results['LogisticRegression']['precision'].append(precision_score(y_test, pred_lr, zero_division=0))
-        results['LogisticRegression']['f2'].append(fbeta_score(y_test, pred_lr, beta=2, zero_division=0))
-        results['LogisticRegression']['auc'].append(roc_auc_score(y_test, prob_lr))
-        pooled_preds['LogisticRegression'].append(pred_lr)
+        # 2. Logistic Regression (Removed for focus on tree-based models)
         
         # 3. Isolation Forest
         contam = np.sum(y_train) / len(y_train)
@@ -106,7 +91,7 @@ def main():
         pooled_preds['IsolationForest'].append(pred_iso)
         
         # 4. Random Forest
-        rf = RandomForestClassifier(n_estimators=300, class_weight='balanced', random_state=seed, n_jobs=-1)
+        rf = RandomForestClassifier(n_estimators=300, class_weight='balanced', random_state=seed, n_jobs=2)
         rf.fit(X_train, y_train)
         pred_rf = rf.predict(X_test)
         prob_rf = rf.predict_proba(X_test)[:, 1]
@@ -131,11 +116,23 @@ def main():
         results['LightGBM']['auc'].append(roc_auc_score(y_test, prob_hgb))
         pooled_preds['LightGBM'].append(pred_hgb)
         
-        # 6. XGBoost
-        xgb_model = xgb.XGBClassifier(n_estimators=300, max_depth=6, learning_rate=0.05, scale_pos_weight=scale_pos, random_state=seed)
+        # 6. XGBoost — canonical hyperparameters matching ml/train.py
+        # description ("0.8 feature subsampling") and the ablation script.
+        # Threshold is loaded dynamically from the trained model config.
+        config_path = f'models_seed_{seed}/config.json'
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        threshold = config.get('threshold', 0.5)
+        xgb_model = xgb.XGBClassifier(
+            n_estimators=300, max_depth=6, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8,
+            scale_pos_weight=scale_pos, random_state=seed,
+            use_label_encoder=False, eval_metric='logloss',
+            tree_method='hist', n_jobs=-1,
+        )
         xgb_model.fit(X_train, y_train)
         prob_xgb = xgb_model.predict_proba(X_test)[:, 1]
-        pred_xgb = (prob_xgb >= 0.5).astype(int)
+        pred_xgb = (prob_xgb >= threshold).astype(int)
         results['XGBoost']['recall'].append(recall_score(y_test, pred_xgb, zero_division=0))
         results['XGBoost']['precision'].append(precision_score(y_test, pred_xgb, zero_division=0))
         results['XGBoost']['f2'].append(fbeta_score(y_test, pred_xgb, beta=2, zero_division=0))

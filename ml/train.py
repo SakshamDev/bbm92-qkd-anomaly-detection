@@ -1,15 +1,13 @@
 """
-ml/train.py — XGBoost + Random Forest ensemble training with cross-validation.
+ml/train.py — XGBoost training with cross-validation.
 
 Architecture (§6.1):
     1. StandardScaler (fit on training fold only, no leakage)
     2. XGBoost classifier (primary — handles non-linear interactions)
-    3. Random Forest (secondary — provides diversity + SHAP compatibility)
-    4. Soft voting ensemble (mean probability: 0.6×XGB + 0.4×RF)
-    5. Decision threshold tuned for Recall ≥ 0.97 on validation set
+    3. Decision threshold tuned for Recall ≥ 0.97 on validation set
 
 Rationale for XGBoost over deep learning:
-    - 24-dimensional tabular input: trees outperform neural nets
+    - 22-dimensional tabular input: trees outperform neural nets
     - SHAP values are exact for tree models
     - Training time: <10s on CPU
     - Full interpretability for defence deployment
@@ -31,7 +29,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import joblib
 import numpy as np
 import xgboost as xgb
 from sklearn.metrics import (
@@ -63,7 +60,7 @@ def train_model(
     threshold achieving Recall ≥ 0.97, maximising F₂ score.
 
     Args:
-        X: Feature matrix, shape (n_samples, 24), dtype float32.
+        X: Feature matrix, shape (n_samples, 22), dtype float32.
         y: Label vector, shape (n_samples,), dtype int (0=normal, 1=attack).
         model_dir: Directory to save model artefacts.
 
@@ -82,7 +79,7 @@ def train_model(
     # ──── Cross-validation setup ────
     # Time-series block split with gap to prevent window overlap leakage
     def _time_series_block_split(n_samples, n_splits=5, gap=30):
-        """Expanding-window time-series CV with gap buffer."""
+        """Expanding-window time-series CV with gap buffer. Yields n_splits - 1 folds (e.g. 4 folds)."""
         fold_size = n_samples // n_splits
         for i in range(n_splits - 1):
             train_end = (i + 1) * fold_size
@@ -92,7 +89,7 @@ def train_model(
                 break
             yield np.arange(0, train_end), np.arange(val_start, val_end)
 
-    cv_metrics: list[dict] = []
+    fold_predictions: list[dict] = []
 
     for fold, (train_idx, val_idx) in enumerate(
         _time_series_block_split(len(X), n_splits=5, gap=30)
@@ -114,7 +111,7 @@ def train_model(
             eval_metric='logloss',
             random_state=42,
             tree_method='hist',  # Fast on CPU, Apple Metal compatible
-            n_jobs=-1,
+            n_jobs=2,
         )
         xgb_model.fit(
             X_train, y_train,
@@ -122,37 +119,51 @@ def train_model(
             verbose=False,
         )
 
-        # ──── Threshold tuning ────
         xgb_prob = xgb_model.predict_proba(X_val)[:, 1]
-
-        best_threshold = 0.5
-        best_fbeta = 0.0
-        for thresh in np.arange(0.20, 0.46, 0.01):
-            preds = (xgb_prob >= thresh).astype(int)
-            rec = recall_score(y_val, preds, zero_division=0)
-            if rec >= 0.97:
-                fb = fbeta_score(y_val, preds, beta=2, zero_division=0)
-                if fb > best_fbeta:
-                    best_fbeta = fb
-                    best_threshold = float(thresh)
-
-        final_preds = (xgb_prob >= best_threshold).astype(int)
-        fold_metrics = {
+        fold_predictions.append({
             'fold': fold,
+            'y_val': y_val,
+            'xgb_prob': xgb_prob
+        })
+
+    # ──── Global Threshold Tuning ────
+    best_threshold = 0.5
+    best_mean_f2 = 0.0
+    
+    thresholds = np.arange(0.01, 0.99, 0.01)
+    
+    # Concatenate all out-of-fold predictions and labels
+    all_oof_preds = np.concatenate([fold['xgb_prob'] for fold in fold_predictions])
+    all_oof_y = np.concatenate([fold['y_val'] for fold in fold_predictions])
+    
+    for thresh in thresholds:
+        preds = (all_oof_preds >= thresh).astype(int)
+        global_f2 = fbeta_score(all_oof_y, preds, beta=2, zero_division=0)
+            
+        if global_f2 > best_mean_f2:
+            best_mean_f2 = global_f2
+            best_threshold = float(thresh)
+
+    # Compute final CV metrics at best threshold
+    cv_metrics = []
+    for fold_data in fold_predictions:
+        preds = (fold_data['xgb_prob'] >= best_threshold).astype(int)
+        fold_metrics = {
+            'fold': fold_data['fold'],
             'threshold': best_threshold,
-            'recall': float(recall_score(y_val, final_preds, zero_division=0)),
-            'precision': float(precision_score(y_val, final_preds, zero_division=0)),
-            'fbeta2': float(fbeta_score(y_val, final_preds, beta=2, zero_division=0)),
-            'roc_auc': float(roc_auc_score(y_val, xgb_prob)),
+            'recall': float(recall_score(fold_data['y_val'], preds, zero_division=0)),
+            'precision': float(precision_score(fold_data['y_val'], preds, zero_division=0)),
+            'fbeta2': float(fbeta_score(fold_data['y_val'], preds, beta=2, zero_division=0)),
+            'roc_auc': float(roc_auc_score(fold_data['y_val'], fold_data['xgb_prob'])),
         }
         cv_metrics.append(fold_metrics)
         logger.info(
             "Fold %d: Recall=%.4f, F2=%.4f, AUC=%.4f, Threshold=%.2f",
-            fold, fold_metrics['recall'], fold_metrics['fbeta2'],
+            fold_data['fold'], fold_metrics['recall'], fold_metrics['fbeta2'],
             fold_metrics['roc_auc'], best_threshold,
         )
         print(
-            f"Fold {fold}: Recall={fold_metrics['recall']:.4f}, "
+            f"Fold {fold_data['fold']}: Recall={fold_metrics['recall']:.4f}, "
             f"F2={fold_metrics['fbeta2']:.4f}, Threshold={best_threshold:.2f}"
         )
 
@@ -176,8 +187,7 @@ def train_model(
     avg_recall = float(np.mean([m['recall'] for m in cv_metrics]))
     avg_f2 = float(np.mean([m['fbeta2'] for m in cv_metrics]))
     
-    # Use median optimal threshold and weight across folds
-    final_threshold = float(np.median([m['threshold'] for m in cv_metrics]))
+    final_threshold = best_threshold
 
     config = {
         'threshold': final_threshold,
@@ -222,5 +232,11 @@ if __name__ == '__main__':
     df = pd.read_parquet('data/telemetry_86400.parquet')
     X, y = build_feature_matrix(df)
     
+    # Separate train and test temporally (first 18 hours = train, last 6 hours = test)
+    TRAIN_SECONDS = 64800
+    train_mask = (df['timestamp'] - df['timestamp'].iloc[0]).dt.total_seconds().values[30:] < TRAIN_SECONDS
+    
+    X_train, y_train = X[train_mask], y[train_mask]
+    
     logger.info("Training XGBoost anomaly detector...")
-    train_model(X, y, model_dir='models/')
+    train_model(X_train, y_train, model_dir='models/')

@@ -9,7 +9,7 @@ Generates all evaluation figures specified in the tech spec:
     - SHAP summary
     - Feature ablation chart
 
-Outputs are saved to paper/figures/.
+Outputs are saved to data/figures/.
 
 """
 
@@ -151,14 +151,26 @@ def run_full_evaluation(
     y: np.ndarray,
     attack_types: np.ndarray,
     model_artifacts: dict[str, Any],
-    figures_dir: str = 'paper/figures/',
+    figures_dir: str = 'data/figures/',
 ) -> dict[str, Any]:
     """Orchestrates generation of all paper figures."""
     logger.info("=== Running figure generation for paper ===")
     
     xgb_prob = model_artifacts['xgb'].predict_proba(X)[:, 1]
-    threshold = model_artifacts['config']['threshold']
+    threshold = model_artifacts['config'].get('threshold', 0.50)
     y_pred = (xgb_prob >= threshold).astype(int)
+    
+    from sklearn.metrics import precision_score, recall_score, fbeta_score, confusion_matrix
+    p = precision_score(y, y_pred, zero_division=0)
+    r = recall_score(y, y_pred, zero_division=0)
+    f2 = fbeta_score(y, y_pred, beta=2, zero_division=0)
+    cm = confusion_matrix(y, y_pred)
+    logger.info(f"SEED 42 METRICS (tau={threshold:.4f}):")
+    logger.info(f"Precision: {p:.4f}")
+    logger.info(f"Recall: {r:.4f}")
+    logger.info(f"F2: {f2:.4f}")
+    logger.info(f"Confusion Matrix:\n{cm}")
+
 
     # 1. ROC Curve
     generate_roc_curve(y, xgb_prob, f'{figures_dir}/roc_curve.png')
@@ -184,16 +196,8 @@ def run_full_evaluation(
     
     # 6. Ablation Simulation (Mocked here since actual ablation requires retraining, 
     # but we are freezing models. We use the documented ablation results.)
-    ablation_results = {
-        'QBER only': 0.72,
-        'Bell S only': 0.65,
-        'Coincidence only': 0.58,
-        'Temporal only': 0.51,
-        'QBER + Bell S': 0.88,
-        'QBER + Coincidence': 0.85
-    }
-    baseline_recall = float(recall_score(y, y_pred))
-    generate_ablation_chart(baseline_recall, ablation_results, f'{figures_dir}/ablation_chart.png')
+    # M-3 Fix: Removed fabricated ablation values. Ablation chart generation requires
+    # explicitly running `feature_group_ablation.py`.
     
     logger.info("All paper figures saved to %s", figures_dir)
     return {"status": "success"}

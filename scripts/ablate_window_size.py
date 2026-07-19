@@ -11,6 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import numpy as np
 import pandas as pd
 import xgboost as xgb
+import json
 from sklearn.metrics import fbeta_score, precision_score, recall_score, roc_auc_score
 
 from core.telemetry import build_telemetry_dataset
@@ -43,11 +44,23 @@ def main():
             X_test, y_test = X[TRAIN_SECONDS - ws:], y[TRAIN_SECONDS - ws:]
             
             scale_pos = np.sum(y_train == 0) / np.sum(y_train == 1)
-            xgb_model = xgb.XGBClassifier(n_estimators=300, max_depth=6, learning_rate=0.05, scale_pos_weight=scale_pos, random_state=seed)
+            xgb_model = xgb.XGBClassifier(
+                n_estimators=300, max_depth=6, learning_rate=0.05,
+                subsample=0.8, colsample_bytree=0.8,
+                scale_pos_weight=scale_pos, random_state=seed,
+                use_label_encoder=False, eval_metric='logloss',
+                tree_method='hist', n_jobs=-1
+            )
             xgb_model.fit(X_train, y_train)
             
+            config_dir = f'models_seed_{seed}' if seed != 42 else 'models'
+            config_path = f'{config_dir}/config.json'
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            threshold = config.get('threshold', 0.5)
+            
             prob_xgb = xgb_model.predict_proba(X_test)[:, 1]
-            pred_xgb = (prob_xgb >= 0.5).astype(int)
+            pred_xgb = (prob_xgb >= threshold).astype(int)
             
             results[ws]['recall'].append(recall_score(y_test, pred_xgb, zero_division=0))
             results[ws]['precision'].append(precision_score(y_test, pred_xgb, zero_division=0))

@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.attacks import attack_intercept_resend, attack_mitm
+
 from ml.features import build_feature_matrix
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -48,18 +48,11 @@ def main():
         'attack_type': np.zeros(n, dtype=int)
     }
     
-    # 3. Inject attacks
-    # The dataset has 473 seconds.
-    # 50s-100s: Intercept-Resend (Eve fraction = 0.25)
-    # 250s-300s: Man-in-the-Middle
-    rng = np.random.default_rng(42)
-    base_telemetry = attack_intercept_resend(base_telemetry, duration_sec=50, start_sec=50, eve_fraction=0.25, rng=rng)
-    base_telemetry = attack_mitm(base_telemetry, duration_sec=50, start_sec=250, rng=rng)
-    
-    df_attacked = pd.DataFrame(base_telemetry)
+    # 3. Use the synthesised telemetry directly (normal data only)
+    df_eval = pd.DataFrame(base_telemetry)
     
     # 4. Extract features
-    X, y = build_feature_matrix(df_attacked, window=30)
+    X, y = build_feature_matrix(df_eval, window=30)
     
     # 5. Load model and evaluate
     model_path = os.path.join(PROJECT_ROOT, 'models', 'xgb_model.json')

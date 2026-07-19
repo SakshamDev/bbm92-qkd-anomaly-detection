@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import numpy as np
 import pandas as pd
 import xgboost as xgb
+import json
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import recall_score, precision_score, fbeta_score
@@ -26,7 +27,7 @@ from ml.features import build_feature_matrix
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
-SEEDS = [42, 123, 2023, 2024, 314]
+SEEDS = [42, 123, 7, 2024, 314]
 TRAIN_SECONDS = 64800
 QBER_THRESHOLD = 0.11
 
@@ -76,7 +77,7 @@ def evaluate_seed(seed):
     }
 
     # 3. Random Forest
-    rf = RandomForestClassifier(n_estimators=300, max_depth=10, class_weight='balanced', random_state=seed, n_jobs=-1)
+    rf = RandomForestClassifier(n_estimators=300, max_depth=10, class_weight='balanced', random_state=seed, n_jobs=2)
     rf.fit(X_train, y_train)
     pred_rf = rf.predict(X_test)
     results['Random Forest'] = {
@@ -88,10 +89,17 @@ def evaluate_seed(seed):
     # 4. XGBoost
     xgb_model = xgb.XGBClassifier(
         n_estimators=300, max_depth=6, learning_rate=0.05,
-        scale_pos_weight=scale_pos, random_state=seed,
+        subsample=0.8, colsample_bytree=0.8, scale_pos_weight=scale_pos,
+        use_label_encoder=False, eval_metric='logloss',
+        tree_method='exact', random_state=seed, n_jobs=-1
     )
     xgb_model.fit(X_train, y_train)
-    pred_xgb = (xgb_model.predict_proba(X_test)[:, 1] >= 0.5).astype(int)
+    config_dir = f'models_seed_{seed}' if seed != 42 else 'models'
+    config_path = f'{config_dir}/config.json'
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    threshold = config.get('threshold', 0.5)
+    pred_xgb = (xgb_model.predict_proba(X_test)[:, 1] >= threshold).astype(int)
     results['XGBoost'] = {
         'recall': recall_score(y_test, pred_xgb),
         'precision': precision_score(y_test, pred_xgb, zero_division=0),

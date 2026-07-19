@@ -9,6 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import pandas as pd
 import xgboost as xgb
 from sklearn.linear_model import LogisticRegression
+import json
 from sklearn.metrics import recall_score
 from sklearn.preprocessing import StandardScaler
 
@@ -32,9 +33,18 @@ def main():
     
     # 1. XGBoost
     scale_pos = np.sum(y_train == 0) / np.sum(y_train == 1)
-    xgb_model = xgb.XGBClassifier(n_estimators=300, max_depth=6, learning_rate=0.05, scale_pos_weight=scale_pos, random_state=seed)
+    xgb_model = xgb.XGBClassifier(
+        n_estimators=300, max_depth=6, learning_rate=0.05,
+        subsample=0.8, colsample_bytree=0.8, scale_pos_weight=scale_pos,
+        use_label_encoder=False, eval_metric='logloss',
+        tree_method='hist', random_state=seed, n_jobs=-1
+    )
     xgb_model.fit(X_train, y_train)
-    pred_xgb = (xgb_model.predict_proba(X_test)[:, 1] >= 0.5).astype(int)
+    config_path = f'models_seed_{seed}/config.json'
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    threshold = config.get('threshold', 0.5)
+    pred_xgb = (xgb_model.predict_proba(X_test)[:, 1] >= threshold).astype(int)
     
     # 2. Logistic Regression
     scaler = StandardScaler()

@@ -27,7 +27,7 @@ def load_model(model_dir: str = 'models/') -> dict[str, Any]:
 
     logger.info(
         "Model loaded from %s (threshold=%.2f)",
-        model_dir, config.get('threshold', 0.5),
+        model_dir, config.get('threshold', 0.50),
     )
     return {
         'xgb': xgb_model,
@@ -57,10 +57,10 @@ def predict_single(
     X = feature_vector.reshape(1, -1)
 
     prob = float(model_artifacts['xgb'].predict_proba(X)[0, 1])
-    threshold = model_artifacts['config'].get('threshold', 0.5)
+    threshold = model_artifacts['config'].get('threshold', 0.50)
     is_attack = prob >= threshold
 
-    if prob >= 0.65:
+    if prob >= 0.85:
         severity = 'CRITICAL'
     elif is_attack:
         severity = 'WARNING'

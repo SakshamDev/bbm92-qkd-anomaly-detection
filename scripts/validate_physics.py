@@ -7,7 +7,10 @@ and literature-agreed trends (e.g. hockey-stick QBER).
 """
 
 import sys
+from pathlib import Path
 import numpy as np
+
+# Ensure project root is on path
 
 sys.path.append('.')
 
@@ -229,7 +232,8 @@ if __name__ == '__main__':
     import logging
     logging.getLogger('core.channel').setLevel(logging.WARNING)
     
-    out_dir = "/Users/sakshamgupta/.gemini/antigravity-ide/brain/4a60dbb5-0174-4559-8714-1e6d0d5b8408"
+    out_dir = Path(__file__).parent.parent / "data"
+    out_dir.mkdir(parents=True, exist_ok=True)
     
     print("Starting Physics Validation Suite...\n")
     test_mathematical_identities()

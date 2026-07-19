@@ -1,6 +1,6 @@
 # Physics-Aware Temporal Feature Engineering for Eavesdropping Detection in BBM92 QKD
 
-> This repository contains the code, experiments, simulator, and paper associated with the research project.
+> This repository contains the code, experiments, and simulator associated with the research project. The research paper source is maintained separately.
 
 **Author:** Saksham Gupta
 **Institution:** BITS Pilani, Hyderabad Campus
@@ -17,16 +17,24 @@ A sophisticated adversary can execute a "blended attack"—timing short bursts o
 
 ## Repository Structure
 ```
-bbm92-qkd-anomaly-detection/
-├── core/                # Physics simulation engine and attack models
-├── ml/                  # Machine learning pipeline and feature engineering
-├── scripts/             # Experiment scripts to reproduce paper tables/figures
-├── tests/               # Pytest validation suite
-├── paper/               # Research paper LaTeX source and supplementary material
-├── data/                # Generated telemetry datasets
-├── models/              # Persisted XGBoost model
-├── docs/                # Research documentation
-└── app.py               # Streamlit real-time monitoring dashboard
+core/
+    Physics simulation and attack models
+ml/
+    Machine learning pipeline and feature engineering
+scripts/
+    Dataset generation
+    Training
+    Evaluation
+    SHAP
+    Baselines
+tests/
+    Pytest validation suite
+data/
+    Generated telemetry datasets and output figures
+models/
+    Persisted XGBoost model
+app.py
+    Streamlit real-time monitoring dashboard
 ```
 
 ## Installation
@@ -37,19 +45,11 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Reproducing Paper Results
-1. Generate the canonical dataset:
-   ```bash
-   python scripts/generate_dataset.py
-   ```
-2. Train the model:
-   ```bash
-   python ml/train.py
-   ```
-3. Run the master evaluation script to generate tables and figures:
-   ```bash
-   python scripts/reproduce_paper_results.py
-   ```
+## Reproduce paper
+1. `python scripts/generate_dataset.py`
+2. `python scripts/reproduce_paper_results.py`
+3. `python scripts/shap_analysis.py`
+4. `python scripts/evaluate_baselines.py`
 
 ## Experiment Scripts
 
@@ -79,16 +79,6 @@ The external satellite QKD validation dataset (from Zenodo) is not committed to 
 1. Download the dataset from the relevant Zenodo archive (URL/DOI to be provided).
 2. Place the raw files in `data/zenodo/`.
 3. Run `python scripts/convert_zenodo_dataset.py` to prepare the data.
-
-## Paper
-The paper source is located in `paper/src/`. Compile it with:
-```bash
-cd paper/src
-pdflatex main.tex
-bibtex main
-pdflatex main.tex
-pdflatex main.tex
-```
 
 ## Tests
 ```bash

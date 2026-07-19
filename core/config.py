@@ -10,6 +10,8 @@ All parameters are strictly categorized as:
 """
 
 from dataclasses import dataclass
+from enum import Enum
+from core.policies import AttenuationPolicy, BeaconSpoofingPolicy, DetectorControlPolicy
 
 @dataclass(frozen=True)
 class PhysicsConfig:
@@ -60,5 +62,26 @@ class PhysicsConfig:
     
     # [SIMULATOR] Macro-scale temporal aggregation window.
     window_size: int = 30  # seconds
+
+class DetectorMode(str, Enum):
+    """Physical operating mode of the Avalanche Photodiode."""
+    GEIGER = "geiger"  # Single-photon sensitive (normal QKD mode)
+    LINEAR = "linear"  # Blinded mode; requires bright classical pulse to click
+
+@dataclass
+class EveCapabilities:
+    """
+    Defines what hardware and optical capabilities Eve possesses in the simulation.
+    """
+    # Optical intercept & detection efficiencies
+    interception_efficiency: float = 0.95
+    detection_efficiency: float = 0.95
+    
+    # Policies for extensible adversarial behavior
+    attenuation_policy: 'AttenuationPolicy' = None
+    beacon_spoofing_policy: 'BeaconSpoofingPolicy' = None
+    detector_control_policy: 'DetectorControlPolicy' = None
+    
+    has_perfect_source: bool = False       # Can emit perfect single photons on demand
 
 PHYSICS_CONFIG = PhysicsConfig()

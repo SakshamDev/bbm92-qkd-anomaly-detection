@@ -22,8 +22,8 @@ def _train_test_model(tmp_path):
     rng = np.random.default_rng(42)
     n = 500
     n_attack = 75
-    X_normal = rng.normal(0, 1, (n - n_attack, 24)).astype(np.float32)
-    X_attack = rng.normal(2, 1.5, (n_attack, 24)).astype(np.float32)
+    X_normal = rng.normal(0, 1, (n - n_attack, 22)).astype(np.float32)
+    X_attack = rng.normal(2, 1.5, (n_attack, 22)).astype(np.float32)
     X = np.vstack([X_normal, X_attack])
     y = np.concatenate([np.zeros(n - n_attack), np.ones(n_attack)]).astype(int)
     perm = rng.permutation(n)

@@ -27,7 +27,12 @@ def main():
     scale_pos = np.sum(y_train == 0) / np.sum(y_train == 1)
     
     # Train XGB
-    xgb_model = xgb.XGBClassifier(n_estimators=300, max_depth=6, learning_rate=0.05, scale_pos_weight=scale_pos, random_state=42)
+    xgb_model = xgb.XGBClassifier(
+        n_estimators=300, max_depth=6, learning_rate=0.05,
+        subsample=0.8, colsample_bytree=0.8, scale_pos_weight=scale_pos,
+        use_label_encoder=False, eval_metric='logloss',
+        tree_method='hist', random_state=42, n_jobs=-1
+    )
     xgb_model.fit(X_train, y_train)
     p_xgb = xgb_model.predict_proba(X_test)[:, 1]
     

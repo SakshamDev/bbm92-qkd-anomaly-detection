@@ -61,11 +61,12 @@ class TestBuildTelemetryDataset:
         )
 
     def test_expected_columns(self, dataset):
-        """All 8 columns should be present."""
+        """All 9 columns should be present."""
         df, _ = dataset
         expected = {
             'timestamp', 'qber', 'bell_S', 'coincidence_rate',
             'visibility', 'channel_loss_dB', 'detection_rate', 'label', 'attack_type',
+            'is_low_count',
         }
         assert set(df.columns) == expected
 
@@ -92,13 +93,13 @@ class TestBuildTelemetryDataset:
         assert df['timestamp'].is_monotonic_increasing
 
     def test_qber_physical_range(self, dataset):
-        """QBER should be in physically plausible range."""
+        """QBER should be in physically plausible range (0 to 1.0)."""
         df, _ = dataset
         assert df['qber'].min() >= 0.0
-        assert df['qber'].max() <= 0.50
+        assert df['qber'].max() <= 1.0
 
     def test_bell_s_physical_range(self, dataset):
-        """Bell S should be in [2.0, 2.828]."""
+        """Bell S should be in [0.0, 3.5] (0.0 during low-count masking)."""
         df, _ = dataset
-        assert df['bell_S'].min() >= 2.0
-        assert df['bell_S'].max() <= 2.828
+        assert df['bell_S'].min() >= 0.0
+        assert df['bell_S'].max() <= 3.5

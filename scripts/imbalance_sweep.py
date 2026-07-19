@@ -10,11 +10,13 @@ if str(PROJECT_ROOT) not in sys.path:
 import pandas as pd
 import numpy as np
 import xgboost as xgb
-from sklearn.metrics import recall_score, fbeta_score
+import json
+from sklearn.metrics import fbeta_score, recall_score
 
 from core.telemetry import build_telemetry_dataset
 from core.channel import simulate_normal_channel
-from core.attacks import attack_intercept_resend, attack_detector_blinding, attack_mitm, attack_blended_subthreshold
+from core.attacks import InterceptResendStrategy, FakedStateStrategy, MitMStrategy, BlendedSubthresholdStrategy
+from core.config import EveCapabilities
 from ml.features import build_feature_matrix
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -25,25 +27,27 @@ def build_custom_dataset(attack_ratio, seed=42):
     # This is a simplified proxy. To get an exact ratio, we vary the duration of blended bursts.
     rng = np.random.default_rng(seed)
     n_seconds = 86400
-    base = simulate_normal_channel(n_seconds=n_seconds, seed=seed)
-    base['attack_type'] = np.zeros(n_seconds, dtype=int)
-    
     # We want attack_ratio * 86400 seconds of attacks.
     target_attack_sec = int(attack_ratio * n_seconds)
     
-    # Fixed base attacks (IR, DB, MitM) take ~4000 seconds
-    # Let's just scale the blended bursts to make up the difference
-    base_attack_sec = 4000
+    # Fixed base attacks (IR, DB, MitM) take ~3000 seconds (3 x 1000s)
+    base_attack_sec = 3000
     blended_sec_needed = max(0, target_attack_sec - base_attack_sec)
     n_bursts = int(blended_sec_needed / 30)
-    
-    # Inject baseline attacks
-    base = attack_intercept_resend(base, duration_sec=1000, start_sec=20000, eve_fraction=0.3, rng=rng)
-    base = attack_detector_blinding(base, duration_sec=1000, start_sec=40000, blinding_intensity=0.5, rng=rng)
-    base = attack_mitm(base, duration_sec=1000, start_sec=60000, rng=rng)
+
+    caps = EveCapabilities()
+    strategies = [
+        InterceptResendStrategy(caps, start_sec=20000, duration_sec=1000, fraction=0.3),
+        FakedStateStrategy(caps, start_sec=40000, duration_sec=1000, trigger_rate=0.5 * 15000.0),
+        MitMStrategy(caps, start_sec=60000, duration_sec=1000),
+    ]
     
     if n_bursts > 0:
-        base = attack_blended_subthreshold(base, n_bursts=n_bursts, burst_duration=30, eve_fraction=0.15, rng=rng)
+        for _ in range(n_bursts):
+            start = int(rng.integers(0, max(1, n_seconds - 30)))
+            strategies.append(BlendedSubthresholdStrategy(caps, start_sec=start, duration_sec=30, fraction=0.15))
+            
+    base = simulate_normal_channel(n_seconds=n_seconds, seed=seed, attack_strategies=strategies)
         
     timestamps = pd.date_range('2026-01-01 00:00:00', periods=n_seconds, freq='1s')
     df = pd.DataFrame({
@@ -77,10 +81,20 @@ def main():
         
         scale_pos = np.sum(y_train == 0) / np.sum(y_train == 1) if np.sum(y_train == 1) > 0 else 1.0
         
-        xgb_model = xgb.XGBClassifier(n_estimators=100, max_depth=6, learning_rate=0.05, scale_pos_weight=scale_pos, random_state=42)
+        xgb_model = xgb.XGBClassifier(
+            n_estimators=300, max_depth=6, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8, scale_pos_weight=scale_pos,
+            use_label_encoder=False, eval_metric='logloss',
+            tree_method='hist', random_state=42, n_jobs=-1
+        )
         xgb_model.fit(X_train, y_train)
         
-        pred_xgb = (xgb_model.predict_proba(X_test)[:, 1] >= 0.5).astype(int)
+        config_path = 'models/config.json'
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        threshold = config.get('threshold', 0.5)
+        
+        pred_xgb = (xgb_model.predict_proba(X_test)[:, 1] >= threshold).astype(int)
         
         f2 = fbeta_score(y_test, pred_xgb, beta=2, zero_division=0)
         rec = recall_score(y_test, pred_xgb, zero_division=0)

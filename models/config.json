@@ -1,5 +1,5 @@
 {
-  "threshold": 0.5,
+  "threshold": 0.03,
   "features": [
     "qber_mean",
     "qber_std",
@@ -17,9 +17,7 @@
     "coincidence_cv",
     "coincidence_qber_corr",
     "detection_to_coinc_ratio",
-    "qber_rolling_variance",
     "bell_S_rolling_range",
-    "burst_energy",
     "temporal_asymmetry",
     "channel_loss_mean",
     "visibility_mean",
@@ -27,7 +25,7 @@
     "S_coincidence_product"
   ],
   "cv_metrics_mean": {
-    "recall": 0.9511866505005983,
-    "fbeta2": 0.9565579964422393
+    "recall": 0.9340729959186342,
+    "fbeta2": 0.9030702519285508
   }
 }

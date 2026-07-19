@@ -258,11 +258,12 @@ def render_bell_panel(
 def render_gauge_panel(
     current_prob: float,
     threshold: float,
+    severity: str,
 ) -> go.Figure:
     """Panel 3: Threat probability gauge indicator."""
-    if current_prob >= 0.65:
+    if severity == 'CRITICAL':
         color = '#ff3344'
-    elif current_prob >= threshold:
+    elif severity == 'WARNING':
         color = '#ffaa00'
     else:
         color = '#00ff88'
@@ -378,6 +379,13 @@ def load_models():
     return model_artifacts, explainer
 
 
+# ─── Load Default Threshold ───
+try:
+    _initial_models, _ = load_models()
+    default_threshold = float(_initial_models['config'].get('threshold', 0.50))
+except Exception:
+    default_threshold = 0.50
+
 # ─── Sidebar controls ───
 st.sidebar.markdown(
     '<div style="text-align:center; padding:1rem 0;">'
@@ -395,6 +403,35 @@ mode = st.sidebar.radio(
     'Execution Mode', ['Simulation', 'Live UDP'], index=0,
     help='Simulation replays telemetry file. Live UDP accepts real-time data.',
 )
+
+# ─── Dataset Discovery ───
+import glob
+
+dataset_files = sorted(glob.glob(str(PROJECT_ROOT / 'data' / '*.parquet')))
+
+def format_dataset_name(path_str):
+    filename = Path(path_str).name
+    if filename == 'zenodo_ent_telemetry.parquet':
+        return 'Real-World Baseline (Zenodo)'
+    elif filename == 'telemetry_86400.parquet':
+        return 'Primary Mixed Attacks (86400s)'
+    elif filename.startswith('telemetry_') and filename.endswith('.parquet'):
+        seed = filename.replace('telemetry_', '').replace('.parquet', '')
+        return f'Simulation Seed: {seed}'
+    return filename
+
+dataset_options = {format_dataset_name(f): f for f in dataset_files}
+
+if mode == 'Simulation':
+    if not dataset_options:
+        st.sidebar.error("No datasets found in data/ directory.")
+        telemetry_path = None
+    else:
+        selected_dataset_name = st.sidebar.selectbox('Select Dataset', list(dataset_options.keys()))
+        telemetry_path = Path(dataset_options[selected_dataset_name])
+else:
+    telemetry_path = None
+
 speed = st.sidebar.select_slider(
     'Playback Speed',
     options=[1, 5, 10, 30, 60], value=10,
@@ -404,8 +441,9 @@ show_shap = st.sidebar.checkbox('Show SHAP on Alerts', value=True)
 
 st.sidebar.markdown('---')
 st.sidebar.markdown('#### 🎯 Detection Settings')
+st.sidebar.caption(f'Model Configuration Threshold: {default_threshold:.2f}')
 threshold_override = st.sidebar.slider(
-    'Detection Threshold', 0.20, 0.50, 0.30, 0.01,
+    'Operating Threshold', 0.20, 0.50, default_threshold, 0.01,
     help='Lower = more sensitive (more alerts). Higher = more specific.',
 )
 
@@ -465,19 +503,44 @@ stats_expander = st.expander('📊 Dataset Statistics', expanded=False)
 
 # ─── Load and display dataset stats ───
 def display_dataset_stats():
-    """Renders the dataset statistics panel."""
-    telemetry_path = PROJECT_ROOT / 'data' / 'telemetry_86400.parquet'
-    if not telemetry_path.exists():
-        stats_expander.warning('No telemetry dataset found.')
+    """Renders the dataset statistics panel dynamically based on selected dataset."""
+    if telemetry_path is None or not telemetry_path.exists():
+        stats_expander.warning('No telemetry dataset selected or found.')
         return
 
     df = pd.read_parquet(str(telemetry_path))
+    
+    # Canonical Dataset Banner
+    if telemetry_path.name == 'telemetry_86400.parquet':
+        st.info(f"**Dataset:**  \n"
+                f"Primary Mixed Attacks (86400s)  \n\n"
+                f"✓ Paper benchmark  \n"
+                f"✓ Threshold: {default_threshold:.2f} (loaded from model)  \n"
+                f"✓ Samples: {len(df):,}  \n"
+                f"✓ Attack fraction: {df['label'].mean()*100:.1f}%")
+                
     with stats_expander:
         sc1, sc2, sc3, sc4 = st.columns(4)
-        sc1.metric('Total Rows', f'{len(df):,}')
-        sc2.metric('Normal', f'{(df["label"]==0).sum():,}')
-        sc3.metric('Attack', f'{(df["label"]==1).sum():,}')
-        sc4.metric('Attack %', f'{df["label"].mean()*100:.1f}%')
+        sc1.metric('Total Duration', f'{len(df):,} s')
+        sc2.metric('Normal Data', f'{(df["label"]==0).sum():,} s')
+        sc3.metric('Attack Data', f'{(df["label"]==1).sum():,} s')
+        sc4.metric('Attack Fraction', f'{df["label"].mean()*100:.1f}%')
+
+        # Attack Breakdown
+        if 'attack_type' in df.columns and df['label'].sum() > 0:
+            st.markdown('##### Attack Breakdown')
+            att_counts = df[df['label'] == 1]['attack_type'].value_counts()
+            att_map = {1: 'Intercept-Resend', 2: 'Detector Blinding', 3: 'Man-in-the-Middle', 4: 'Blended Sub-Threshold'}
+            
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric('Intercept-Resend', f'{att_counts.get(1, 0):,} s')
+            c2.metric('Detector Blinding', f'{att_counts.get(2, 0):,} s')
+            c3.metric('MitM', f'{att_counts.get(3, 0):,} s')
+            c4.metric('Blended Bursts', f'{att_counts.get(4, 0):,} s')
+
+        # Metadata Note
+        st.markdown('##### Dataset Metadata')
+        st.info("💡 **Note**: Attacker capabilities (Beacon Spoofing Policy, Deterministic Control) are configured during generation. Specific levels cannot be explicitly inferred from the `.parquet` schema alone and are marked as **Unknown/Mixed** unless specified in the filename.")
 
         st.markdown('##### Descriptive Statistics')
         num_cols = ['qber', 'bell_S', 'coincidence_rate', 'visibility',
@@ -488,24 +551,24 @@ def display_dataset_stats():
         st.dataframe(stats_df.style.format('{:.4f}'), use_container_width=True)
 
         # Attack distribution by hour
-        st.markdown('##### Attack Distribution by Hour')
-        df['hour'] = df['timestamp'].dt.hour
-        attack_by_hour = df.groupby('hour')['label'].sum()
+        if 'timestamp' in df.columns:
+            st.markdown('##### Attack Distribution by Hour')
+            df['hour'] = df['timestamp'].dt.hour
+            attack_by_hour = df.groupby('hour')['label'].sum()
 
-        fig_hist = go.Figure(go.Bar(
-            x=attack_by_hour.index,
-            y=attack_by_hour.values,
-            marker_color='#ff6b6b',
-            marker_line_width=0,
-        ))
-        fig_hist.update_layout(
-            xaxis_title='Hour of Day',
-            yaxis_title='Attack Seconds',
-            height=250,
-            **PLOTLY_LAYOUT_DEFAULTS,
-        )
-        st.plotly_chart(fig_hist, use_container_width=True)
-
+            fig_hist = go.Figure(go.Bar(
+                x=attack_by_hour.index,
+                y=attack_by_hour.values,
+                marker_color='#ff6b6b',
+                marker_line_width=0,
+            ))
+            fig_hist.update_layout(
+                xaxis_title='Hour of Day',
+                yaxis_title='Attack Seconds',
+                height=250,
+                **PLOTLY_LAYOUT_DEFAULTS,
+            )
+            st.plotly_chart(fig_hist, use_container_width=True)
 
 display_dataset_stats()
 
@@ -515,16 +578,8 @@ display_dataset_stats()
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if mode == 'Simulation':
-    telemetry_path = PROJECT_ROOT / 'data' / 'telemetry_86400.parquet'
-    if not telemetry_path.exists():
-        st.error(
-            '⚠️ Telemetry file not found. Run telemetry generation first:\n\n'
-            '```bash\n'
-            'cd bbm92_drdo\n'
-            'python -c "from core.telemetry import build_telemetry_dataset; '
-            'build_telemetry_dataset()"\n'
-            '```'
-        )
+    if telemetry_path is None or not telemetry_path.exists():
+        st.error('⚠️ No telemetry file selected or found. Please ensure datasets exist in the data/ directory.')
         st.stop()
 
     telemetry_df = pd.read_parquet(str(telemetry_path))
@@ -585,7 +640,7 @@ if mode == 'Simulation':
 
                 if result['is_attack']:
                     st.session_state.total_alerts += 1
-                    skr = secure_key_rate(qber_val)
+                    skr = secure_key_rate(qber_val, sifted_rate=coinc_val / 2.0)
                     alert_entry = {
                         'Timestamp': str(ts),
                         'QBER (%)': f'{qber_val * 100:.2f}',
@@ -616,7 +671,7 @@ if mode == 'Simulation':
 
             with gauge_placeholder.container():
                 st.plotly_chart(
-                    render_gauge_panel(prob, threshold_override),
+                    render_gauge_panel(prob, threshold_override, result['severity']),
                     use_container_width=True, key=f'gauge_{idx}',
                 )
 
@@ -627,7 +682,7 @@ if mode == 'Simulation':
                 )
 
             # Metrics row
-            skr_current = secure_key_rate(qber_val)
+            skr_current = secure_key_rate(qber_val, sifted_rate=coinc_val / 2.0)
             metric_placeholders[0].metric('⏱️ Time', f't={idx}s')
             metric_placeholders[1].metric(
                 '📊 QBER', f'{qber_val * 100:.2f}%'
@@ -709,6 +764,13 @@ if mode == 'Simulation':
         bell_list = list(st.session_state.bell_history)
         prob_list = list(st.session_state.prob_history)
         ts_list = list(st.session_state.ts_history)
+        
+        if prob >= 0.85:
+            severity = 'CRITICAL'
+        elif prob >= threshold_override:
+            severity = 'WARNING'
+        else:
+            severity = 'NORMAL'
 
         with qber_placeholder.container():
             st.plotly_chart(
@@ -718,7 +780,7 @@ if mode == 'Simulation':
 
         with gauge_placeholder.container():
             st.plotly_chart(
-                render_gauge_panel(prob, threshold_override),
+                render_gauge_panel(prob, threshold_override, severity),
                 use_container_width=True, key=f'gauge_paused',
             )
 
@@ -728,7 +790,7 @@ if mode == 'Simulation':
                 use_container_width=True, key=f'bell_paused',
             )
 
-        skr_current = secure_key_rate(qber_val)
+        skr_current = secure_key_rate(qber_val, sifted_rate=coinc_val / 2.0)
         metric_placeholders[0].metric('⏱️ Time', f't={idx}s (PAUSED)')
         metric_placeholders[1].metric('📊 QBER', f'{qber_val * 100:.2f}%')
         metric_placeholders[2].metric('🔔 Bell S', f'{bell_val:.3f}')
@@ -868,7 +930,7 @@ elif mode == 'Live UDP':
 
                 if result['is_attack']:
                     st.session_state.total_alerts += 1
-                    skr = secure_key_rate(qber_val)
+                    skr = secure_key_rate(qber_val, sifted_rate=coinc_val / 2.0)
                     alert_entry = {
                         'Timestamp': str(ts),
                         'QBER (%)': f'{qber_val * 100:.2f}',
@@ -899,7 +961,7 @@ elif mode == 'Live UDP':
 
             with gauge_placeholder.container():
                 st.plotly_chart(
-                    render_gauge_panel(prob, threshold_override),
+                    render_gauge_panel(prob, threshold_override, result['severity']),
                     use_container_width=True, key=f'gauge_{idx}',
                 )
 
@@ -910,7 +972,7 @@ elif mode == 'Live UDP':
                 )
 
             # Metrics row
-            skr_current = secure_key_rate(qber_val)
+            skr_current = secure_key_rate(qber_val, sifted_rate=coinc_val / 2.0)
             metric_placeholders[0].metric('⏱️ Time', f't={idx}s')
             metric_placeholders[1].metric(
                 '📊 QBER', f'{qber_val * 100:.2f}%'

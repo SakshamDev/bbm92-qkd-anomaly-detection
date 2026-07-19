@@ -39,10 +39,10 @@ class TestFeatureNames:
     """Tests for the canonical feature names list."""
 
     def test_feature_count(self):
-        assert len(FEATURE_NAMES) == 24
+        assert len(FEATURE_NAMES) == 22
 
     def test_unique_names(self):
-        assert len(set(FEATURE_NAMES)) == 24
+        assert len(set(FEATURE_NAMES)) == 22
 
     def test_window_size(self):
         assert WINDOW == 30
@@ -83,7 +83,7 @@ class TestExtractFeaturesSingle:
     def test_output_shape(self):
         window = _make_test_window(30)
         features = extract_features_single(window)
-        assert features.shape == (24,)
+        assert features.shape == (22,)
 
     def test_output_dtype(self):
         window = _make_test_window(30)
@@ -149,7 +149,7 @@ class TestBuildFeatureMatrix:
             'label': rng.choice([0, 1], n, p=[0.85, 0.15]),
         })
         X, y = build_feature_matrix(df, window=30)
-        assert X.shape == (n - 30, 24)
+        assert X.shape == (n - 30, 22)
         assert y.shape == (n - 30,)
 
     def test_no_nan_in_matrix(self):
