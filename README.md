@@ -1,5 +1,7 @@
-# Physics-Aware Temporal Feature Engineering for Eavesdropping Detection in BBM92 QKD
+# Temporal Cross-Channel Features for Eavesdropping Detection in Free-Space BBM92 QKD under Hierarchical Threat Models
 
+> **Accepted at IEEE INDISCON 2026**
+> 
 > This repository contains the code, experiments, and simulator associated with the research project. The research paper source is maintained separately.
 
 **Author:** Saksham Gupta
@@ -10,7 +12,7 @@ Solid State Physics Laboratory (SSPL), DRDO
 under the mentorship of Dr. Lalit Kumar
 
 ## Abstract
-Traditional security in Quantum Key Distribution (QKD) relies on aborting key generation when the Quantum Bit Error Rate (QBER) exceeds a static threshold. However, in noisy free-space optical (FSO) channels, natural atmospheric variations can camouflage short, low-intensity eavesdropping bursts. We propose a machine learning-based defense strategy specifically designed for entanglement-based (BBM92) QKD telemetry. By engineering a 24-dimensional feature space computed over a 30-second sliding window, we evaluate the temporal shape and cross-observable correlation of QBER, Bell S parameter, and photon coincidence rates. Evaluated on a comprehensive simulated FSO telemetry dataset, our framework demonstrates that static QBER thresholding fails catastrophically against stealthy blended attacks, achieving only 17.3% recall. In contrast, our multivariate approach suggests that such attacks can be identified with 96.9% recall and 97.6% precision within the simulated environment. SHAP analysis indicates that stealthy attacks are not detected by absolute error magnitude, but by anomalous temporal cross-correlations between independent quantum observables.
+Static QBER thresholding can miss adaptive eavesdropping in free-space BBM92 QKD because atmospheric turbulence masks short attack bursts, keeping the aggregate error rate below the abort threshold. This paper evaluates a temporal feature engineering framework for machine learning-based detection in simulated BBM92 telemetry. We define a hierarchical attacker capability model at three levels: Naive, AR1 (statistical count-rate spoofing), and Replay (exact marginal-distribution replay). A feature leakage audit shows that raw count-rate separability drops from AUC 1.000 to near chance as attacker capability increases. A 22-dimensional temporal feature vector, computed over 30-second sliding windows, captures cross-channel correlations and higher-order statistics of QBER, the Bell S parameter, and coincidence rates. The cross-channel representation achieves 91.3% recall and 94.2% precision (F2 = 0.914 ± 0.113) on unseen attacks, vastly outperforming static loss and error thresholds. We conclude that temporal dynamics of Bell-inequality violations and coincidences provide robust indicators of malicious intervention even when raw quantum error rates remain below traditional alarm thresholds. These results indicate that temporal cross-channel feature modeling provides a physics-informed detection capability that is robust to progressive adversarial concealment in high-variance atmospheric conditions.
 
 ## Research Motivation
 A sophisticated adversary can execute a "blended attack"—timing short bursts of low-intensity eavesdropping to coincide with natural atmospheric turbulence, thereby keeping the aggregate QBER below the abort threshold. Static thresholding is structurally blind to this threat vector. This framework uses XGBoost and rolling window telemetry to catch the non-physical cross-correlations introduced by such attacks.
@@ -87,11 +89,12 @@ python -m pytest tests/ -v
 
 ## Citation
 ```bibtex
-@article{gupta2026bbm92,
-  title={Physics-Aware Temporal Feature Engineering for Eavesdropping Detection in BBM92 Quantum Key Distribution},
+@inproceedings{gupta2026bbm92,
+  title={Temporal Cross-Channel Features for Eavesdropping Detection in Free-Space BBM92 QKD under Hierarchical Threat Models},
   author={Gupta, Saksham},
-  journal={IACR Cryptology ePrint Archive},
-  year={2026}
+  booktitle={Proceedings of the IEEE INDISCON 2026},
+  year={2026},
+  organization={IEEE}
 }
 ```
 
